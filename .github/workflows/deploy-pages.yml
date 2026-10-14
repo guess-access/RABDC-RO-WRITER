@@ -1,0 +1,50 @@
+# Publish the static site to GitHub Pages.
+#
+# This project has no build step at all — it is plain HTML/CSS/JS — so the job
+# only stages the files and hands them to the official Pages action. We use the
+# Actions workflow rather than the legacy "legacy" Pages builder because that
+# older builder now fails outright for newly-enabled repositories.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [ "App" ]
+  workflow_dispatch:
+
+# The deploy action needs to write the Pages artifact and mint an OIDC token;
+# the checkout only needs to read the repo.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never cancel a deploy half-way through — finish the in-flight one first.
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # .git would bloat the artifact and could be published alongside the site,
+      # and .github holds the workflow itself — neither belongs in the deploy.
+      - name: Stage the site
+        run: |
+          mkdir -p _site
+          rsync -a --exclude '.git' --exclude '.github' --exclude '_site' ./ _site/
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
