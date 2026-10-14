@@ -1,0 +1,26 @@
+# Netlify configuration — this is a plain static site, there is no build step.
+#
+# Everything runs in the browser: the export is parsed locally and the only
+# network call is to your own Google Apps Script, which sends CORS headers, so
+# hosting here is safe and needs no proxy or serverless function.
+[build]
+  publish = "."
+  branch  = "App"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"
+
+# app.js and styles.css change with every feature; keep the browser from
+# holding a stale copy while you are testing.
+[[headers]]
+  for = "/app.js"
+  [headers.values]
+    Cache-Control = "no-cache"
+
+[[headers]]
+  for = "/index.html"
+  [headers.values]
+    Cache-Control = "no-cache"
