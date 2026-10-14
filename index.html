@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RO Ledger Link — Auto-fill RO# on your Sources Ledger</title>
+<meta name="description" content="Import your DMS appointment export, match it against the dealership Sources Ledger in Google Sheets, and write the RO# back automatically.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔧</text></svg>">
+</head>
+<body>
+
+<!-- ============================ TOP BAR ============================ -->
+<header class="topbar">
+  <div class="topbar-inner">
+    <a class="brand" href="#top">
+      <span class="brand-mark">RO</span>
+      <span class="brand-text">Ledger Link<small>Appointment &rarr; Repair Order</small></span>
+    </a>
+    <div class="topbar-right">
+      <span class="conn-pill" id="connPill" data-state="off">
+        <span class="dot"></span><span id="connText">Not connected</span>
+      </span>
+      <button class="btn btn-ghost btn-sm" id="resetAll" type="button">Reset</button>
+    </div>
+  </div>
+</header>
+
+<!-- ============================ HERO ============================ -->
+<section class="hero" id="top">
+  <div class="hero-inner">
+    <p class="eyebrow">Service drive utility</p>
+    <h1>Stop typing RO#s into the ledger by hand.</h1>
+    <p class="lede">
+      Export your open ROs from the DMS, drop the file here, and every appointment
+      you booked gets matched to its row in the Sources Ledger — then the RO# is
+      written straight into the sheet. You approve every match first.
+    </p>
+
+    <ol class="steps" id="stepRail">
+      <li data-step="1" class="is-active"><b>1</b> Connect the sheet</li>
+      <li data-step="2"><b>2</b> Import the export</li>
+      <li data-step="3"><b>3</b> Review matches</li>
+      <li data-step="4"><b>4</b> Write RO#s</li>
+    </ol>
+  </div>
+</section>
+
+<main>
+
+<!-- ============================ 1. CONNECT ============================ -->
+<section class="panel" id="panel-connect">
+  <div class="panel-head">
+    <h2><span class="num">1</span> Connect your Sources Ledger</h2>
+    <p class="muted">Paste the Web app URL from your Google Apps Script. The site talks
+      to the sheet through it — nothing is stored on any server.</p>
+  </div>
+
+  <div class="grid-2">
+    <div class="field">
+      <label for="endpoint">Apps Script Web app URL</label>
+      <input type="url" id="endpoint" spellcheck="false" autocomplete="off"
+             placeholder="https://script.google.com/macros/s/AKfy…/exec">
+      <p class="hint">Deploy from <code>Extensions &rarr; Apps Script</code> as
+        <b>Execute as: Me</b> &middot; <b>Access: Anyone</b>. Full steps in the README.</p>
+    </div>
+
+    <div class="field">
+      <label for="secret">Shared secret <span class="opt">optional</span></label>
+      <input type="password" id="secret" spellcheck="false" autocomplete="off"
+             placeholder="Leave blank unless you set CONFIG.SECRET">
+      <p class="hint">Matches <code>CONFIG.SECRET</code> in <code>Code.gs</code>.
+        Recommended — treat the URL itself as a password.</p>
+    </div>
+  </div>
+
+  <div class="btn-row">
+    <button class="btn btn-primary" id="btnConnect" type="button">Connect</button>
+    <span class="status" id="connectStatus" aria-live="polite"></span>
+  </div>
+
+  <!-- Shown only after a successful handshake -->
+  <div class="subpanel" id="sheetPicker" hidden>
+    <div class="field">
+      <label for="tabSelect">Ledger tab <span class="opt">resolves to this month, e.g. "October 2026"</span></label>
+      <select id="tabSelect"></select>
+      <p class="hint" id="sheetMeta"></p>
+    </div>
+
+    <div class="map-block">
+      <h3>Column mapping <span class="opt">auto-detected &mdash; RO# is pinned to the "RO" heading</span></h3>
+      <div class="map-grid" id="ledgerMapGrid"></div>
+    </div>
+
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btnLoadLedger" type="button">Load ledger</button>
+      <span class="status" id="loadStatus" aria-live="polite"></span>
+    </div>
+  </div>
+
+  <!-- Ledger preview -->
+  <div class="subpanel" id="ledgerView" hidden>
+    <div class="table-head">
+      <h3>Ledger loaded <span class="badge" id="ledgerCount">0 rows</span></h3>
+      <input type="search" id="ledgerFilter" placeholder="Filter rows…">
+    </div>
+    <div class="table-scroll">
+      <table class="data" id="ledgerTable">
+        <thead></thead><tbody></tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 2. IMPORT ============================ -->
+<section class="panel" id="panel-import" hidden>
+  <div class="panel-head">
+    <h2><span class="num">2</span> Import the appointment / RO export</h2>
+    <p class="muted">CSV or Excel straight out of the DMS. The file is parsed in your
+      browser — it is never uploaded anywhere.</p>
+  </div>
+
+  <div class="seg" id="directionSeg" role="radiogroup" aria-label="Direction of the RO#">
+    <button type="button" class="seg-btn is-on" data-dir="write" role="radio" aria-checked="true">
+      <b>File supplies the RO#</b>
+      <span>Match the export to the ledger and stamp the RO# into the sheet.</span>
+    </button>
+    <button type="button" class="seg-btn" data-dir="fetch" role="radio" aria-checked="false">
+      <b>Ledger supplies the RO#</b>
+      <span>Pull the RO# out of the ledger for each imported appointment, then export it.</span>
+    </button>
+  </div>
+
+  <div class="drop" id="dropZone" tabindex="0" role="button"
+       aria-label="Choose or drop an appointment export file">
+    <input type="file" id="fileInput" accept=".csv,.xlsx,.xls,text/csv" hidden>
+    <div class="drop-inner" id="dropIdle">
+      <span class="drop-icon">⇪</span>
+      <p><b>Drop your export here</b> or click to browse</p>
+      <p class="muted small">.csv &middot; .xlsx &middot; .xls</p>
+    </div>
+    <div class="drop-inner" id="dropLoaded" hidden>
+      <span class="drop-icon ok">✓</span>
+      <p><b id="fileName">file.csv</b></p>
+      <p class="muted small" id="fileMeta"></p>
+      <button class="btn btn-ghost btn-sm" id="btnClearFile" type="button">Choose a different file</button>
+    </div>
+  </div>
+
+  <div class="subpanel" id="importMap" hidden>
+    <div class="map-block">
+      <h3>Import column mapping <span class="opt">auto-detected &mdash; override if needed</span></h3>
+      <div class="map-grid" id="importMapGrid"></div>
+    </div>
+    <div class="btn-row">
+      <button class="btn btn-primary" id="btnMatch" type="button">Find matches</button>
+      <span class="status" id="matchStatus" aria-live="polite"></span>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ 3. REVIEW ============================ -->
+<section class="panel" id="panel-review" hidden>
+  <div class="panel-head">
+    <h2><span class="num">3</span> Review the matches</h2>
+    <p class="muted">Confidence is only a suggestion. Untick anything that looks wrong —
+      nothing is written until you press the button in step 4.</p>
+  </div>
+
+  <div class="legend">
+    <span class="tag high">High</span> phone or VIN match, or full name + same day
+    <span class="tag med">Medium</span> surname + date within a day
+    <span class="tag low">Low</span> name only &mdash; check carefully
+    <span class="tag none">No match</span> nothing in the ledger lines up
+  </div>
+
+  <div class="filters">
+    <label class="chk"><input type="checkbox" id="selHigh" checked> Select all high</label>
+    <label class="chk"><input type="checkbox" id="selMed"> Select all medium</label>
+    <label class="chk"><input type="checkbox" id="allowOverwrite"> Overwrite RO#s already in the ledger</label>
+    <span class="spacer"></span>
+    <span class="tally" id="matchTally"></span>
+  </div>
+
+  <div class="table-scroll tall">
+    <table class="data" id="matchTable">
+      <thead></thead><tbody></tbody>
+    </table>
+    <p class="empty" id="matchEmpty" hidden></p>
+  </div>
+</section>
+
+<!-- ============================ 4. WRITE ============================ -->
+<section class="panel" id="panel-write" hidden>
+  <div class="panel-head">
+    <h2><span class="num">4</span> Write the RO#s</h2>
+    <p class="muted" id="writeBlurb"></p>
+  </div>
+
+  <div class="summary" id="writeSummary"></div>
+
+  <div class="btn-row">
+    <button class="btn btn-primary btn-lg" id="btnWrite" type="button">Write RO#s to the ledger</button>
+    <button class="btn btn-ghost" id="btnExport" type="button">Download report</button>
+    <span class="status" id="writeStatus" aria-live="polite"></span>
+  </div>
+
+  <div class="subpanel" id="writeResults" hidden>
+    <div class="table-head">
+      <h3>Result</h3>
+      <span class="muted small" id="writeResultMeta"></span>
+    </div>
+    <div class="table-scroll">
+      <table class="data" id="resultTable">
+        <thead></thead><tbody></tbody>
+      </table>
+    </div>
+    <p class="hint">
+      A <b>conflict</b> means the ledger already had an RO# on that row and you left
+      overwrite switched off — the cell was left untouched on purpose.
+    </p>
+  </div>
+</section>
+
+<!-- ============================ SETUP CHEATSHEET ============================ -->
+<section class="panel panel-quiet" id="panel-help">
+  <div class="panel-head">
+    <h2>First-time setup</h2>
+  </div>
+  <ol class="howto">
+    <li>Open your Sources Ledger in Google Sheets.</li>
+    <li><b>Extensions &rarr; Apps Script</b>, delete whatever is there, and paste in
+      <code>apps-script/Code.gs</code>. Save.</li>
+    <li><b>Deploy &rarr; New deployment &rarr; Web app</b> —
+      <i>Execute as: Me</i>, <i>Who has access: Anyone</i>. Authorise when asked.</li>
+    <li>Copy the <b>Web app URL</b> (<code>…/exec</code>) and paste it into step 1 above.</li>
+    <li>Drop your DMS export, review the matches, write.</li>
+  </ol>
+  <p class="hint">
+    Want a second lock? Set <code>SECRET: 'something-long'</code> near the top of
+    <code>Code.gs</code> and paste the same value into the site. Redeploy as a
+    <i>new</i> deployment whenever you want to invalidate an old URL.
+  </p>
+</section>
+
+</main>
+
+<footer class="footer">
+  <p>Runs entirely in your browser. Files are parsed locally; the only network call is
+     to your own Apps Script.</p>
+</footer>
+
+<div class="toast-wrap" id="toastWrap" aria-live="polite"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
