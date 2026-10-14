@@ -119,7 +119,7 @@
 <section class="panel" id="panel-import" hidden>
   <div class="panel-head">
     <h2><span class="num">2</span> Import the appointment / RO export</h2>
-    <p class="muted">CSV or Excel straight out of the DMS. The file is parsed in your
+    <p class="muted">CSV, Excel or PDF straight out of the DMS. The file is parsed in your
       browser — it is never uploaded anywhere.</p>
   </div>
 
@@ -136,11 +136,11 @@
 
   <div class="drop" id="dropZone" tabindex="0" role="button"
        aria-label="Choose or drop an appointment export file">
-    <input type="file" id="fileInput" accept=".csv,.xlsx,.xls,text/csv" hidden>
+    <input type="file" id="fileInput" accept=".csv,.xlsx,.xls,.pdf,text/csv,application/pdf" hidden>
     <div class="drop-inner" id="dropIdle">
       <span class="drop-icon">⇪</span>
       <p><b>Drop your export here</b> or click to browse</p>
-      <p class="muted small">.csv &middot; .xlsx &middot; .xls</p>
+      <p class="muted small">.csv &middot; .xlsx &middot; .xls &middot; .pdf</p>
     </div>
     <div class="drop-inner" id="dropLoaded" hidden>
       <span class="drop-icon ok">✓</span>
@@ -257,6 +257,7 @@
 
 <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="app.js"></script>
 </body>
 </html>

@@ -8,7 +8,7 @@
    Pipeline:
        connect  ->  ping the Apps Script, pick a tab, map columns
        ledger   ->  pull the Sources Ledger rows into memory
-       import   ->  parse the CSV/XLSX export locally
+       import   ->  parse the CSV/XLSX/PDF export locally
        match    ->  score every import row against every ledger row
        review   ->  you tick or untick what you agree with
        write    ->  one batched POST stamps the RO#s into the sheet
@@ -18,6 +18,10 @@
    =========================================================================== */
 (function () {
 'use strict';
+
+// pdf.js fetches its own worker script; the version must match the library
+// loaded in index.html or the two refuse to talk to each other.
+var PDF_WORKER = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
 
 /* ------------------------------------------------------------------ DOM */
 var $  = function (sel) { return document.querySelector(sel); };
@@ -569,6 +573,209 @@ function parseCsvFallback(text) {
   return rows.filter(function (r) { return r.some(function (c) { return String(c).trim() !== ''; }); });
 }
 
+/* ------------------------------------------------- PDF: DMS appointment blocks
+ *
+ * Some DMS exports arrive as PDF, and those reports are NOT tables — each
+ * appointment is a block of "Label:  value" pairs drawn on a grid:
+ *
+ *   Appt Time:  Oct 5, 2026 07:00AM   Transport:  Drop Off Vehicle
+ *   Customer:   JANE Q. PUBLIC        Customer DMS ID:  123456
+ *   Year/Make/Model: 2022 Hyundai Tucson  VIN:  5NPET4JA7KH123456
+ *
+ * It still reconstructs reliably because of two invariants the DMS honours:
+ * every label sits at a fixed X, and its value starts at the next X to the
+ * right. Wrapped labels ("Mobile" / "Phone:") and wrapped values (a long
+ * model name spilling a line) keep the same X, so neither breaks the grid.
+ * We rebuild the blocks into a flat table and feed the ordinary pipeline. */
+function pdfBlocksToRows(items) {
+  var its = [];
+  (items || []).forEach(function (it) {
+    var s = String(it && it.s != null ? it.s : '').replace(/\s+/g, ' ').trim();
+    if (!s) return;
+    its.push({ s: s, x: +it.x || 0, y: +it.y || 0, page: it.page || 1 });
+  });
+  if (!its.length) return [];
+
+  /** Which "Label:" strings actually open a field. Ending in a colon is NOT
+   *  enough on its own: wrapped free text (Advisor Notes, for one) carries its
+   *  own colons — "…, Status: Scheduled…" — and mistaking that for a field
+   *  would invent a bogus column and truncate the real value beside it. */
+  var FIELD_KEYS = {
+    'appt time': 1, 'transport': 1, 'carry-over': 1, 'customer': 1,
+    'customer dms id': 1, 'mobile phone': 1, 'phone': 1, 'home phone': 1,
+    'work phone': 1, 'year/make/model': 1, 'vin': 1, 'mileage': 1,
+    'advisor': 1, 'technician': 1, 'services': 1, 'advisor notes': 1,
+    'customer comments': 1
+  };
+  function fieldKey(s) {
+    return s.replace(/:$/, '').replace(/\s+/g, ' ').trim().toLowerCase();
+  }
+
+  // 1. Cluster every left edge into an X anchor = one grid column.
+  var xs = its.map(function (t) { return t.x; }).sort(function (a, b) { return a - b; });
+  var anchors = [];
+  xs.forEach(function (x) {
+    if (!anchors.length || x - anchors[anchors.length - 1] > 3) anchors.push(x);
+  });
+  function anchorOf(x) {
+    var best = 0, bd = Infinity;
+    for (var a = 0; a < anchors.length; a++) {
+      var d = Math.abs(anchors[a] - x);
+      if (d < bd) { bd = d; best = a; }
+    }
+    return best;
+  }
+  its.forEach(function (t) { t.a = anchorOf(t.x); });
+
+  // 2. Reading order: page, top to bottom, left to right. PDF Y grows
+  //    upwards, hence the descending sort.
+  its.sort(function (p, q) { return p.page - q.page || q.y - p.y || p.x - q.x; });
+
+  // 3. Group into visual lines (Y wobbles by a fraction of a point).
+  var lines = [], cur = null;
+  its.forEach(function (t) {
+    if (!cur || cur.page !== t.page || Math.abs(cur.y - t.y) > 2) {
+      cur = { page: t.page, y: t.y, items: [] };
+      lines.push(cur);
+    }
+    cur.items.push(t);
+  });
+  lines.forEach(function (l) { l.items.sort(function (a, b) { return a.x - b.x; }); });
+
+  // 4. Re-join labels the renderer split across two lines.
+  for (var li = 0; li < lines.length - 1; li++) {
+    var la = lines[li], lb = lines[li + 1];
+    if (la.page !== lb.page || lb.y > la.y || la.y - lb.y > 12) continue;
+    la.items.forEach(function (t) {
+      // A wrapped field label is short and colon-free up to this point.
+      if (/:$/.test(t.s) || t.s.length > 20) return;
+      for (var k = 0; k < lb.items.length; k++) {
+        var u = lb.items[k];
+        if (u.a !== t.a || u.skip || !/:$/.test(u.s) || /:.*:/.test(u.s)) continue;
+        t.s = t.s + ' ' + u.s;
+        u.skip = true;
+        return;
+      }
+    });
+  }
+
+  // 5. Flatten, marking which fragments open a field.
+  var seq = [];
+  lines.forEach(function (l) {
+    l.items.forEach(function (t) {
+      if (t.skip) return;
+      t.isLabel = /:$/.test(t.s) && !!FIELD_KEYS[fieldKey(t.s)];
+      seq.push(t);
+    });
+  });
+
+  // The X positions that ever open a field are the label columns of the grid.
+  var labelXs = [];
+  seq.forEach(function (t) {
+    if (t.isLabel && labelXs.indexOf(t.x) < 0) labelXs.push(t.x);
+  });
+  labelXs.sort(function (p, q) { return p - q; });
+
+  /** Text belonging to the label at index i. The value starts at the next X
+   *  to the right and keeps running down the page until a label at our own
+   *  column — or further left — begins the next field. That boundary is what
+   *  stops one field bleeding into the next even though they share an X. */
+  function takeValue(i, t) {
+    var maxX = Infinity;
+    for (var z = 0; z < labelXs.length; z++) {
+      if (labelXs[z] > t.x) { maxX = labelXs[z]; break; }
+    }
+    var out = [];
+    for (var j = i + 1; j < seq.length; j++) {
+      var u = seq[j];
+      if (u.isLabel && u.x <= t.x) break;
+      if (u.x <= t.x || u.x >= maxX) continue;
+      out.push(u.s);
+    }
+    return out.join(' ');
+  }
+
+  // 6. Walk in order, opening a new record at every "Appt Time:".
+  var recs = [], rec = null;
+  for (var i = 0; i < seq.length; i++) {
+    var t = seq[i];
+    if (!t.isLabel) continue;                       // page title / footer
+    var key = fieldKey(t.s);
+    if (key === 'appt time') { rec = { _appt: '' }; recs.push(rec); }
+    if (!rec) continue;
+
+    var v = takeValue(i, t);
+    if (key === 'appt time') rec._appt = v;
+    else if (key === 'customer') rec.name = v;
+    else if (key === 'customer dms id') rec.dms = v;
+    else if (key === 'mobile phone' || key === 'phone') rec.phone = v;
+    else if (key === 'home phone') rec.home = v;
+    else if (key === 'work phone') rec.work = v;
+    else if (key === 'year/make/model') rec.vehicle = v;
+    else if (key === 'vin') rec.vin = v;
+    else if (key === 'mileage') rec.mileage = v;
+    else if (key === 'advisor') rec.advisor = v;
+    else if (key === 'technician') rec.tech = v;
+    else if (key === 'services') rec.services = v;
+    else if (key === 'transport') rec.transport = v;
+    else if (key === 'carry-over') rec.carry = v;
+  }
+
+  var blank = function (v) {
+    var s = String(v == null ? '' : v).trim();
+    return /^(n\/?a|none|null|-|\u2014|not available)$/i.test(s) ? '' : s;
+  };
+  var rows = [[
+    'CUSTOMER', 'PHONE', 'VIN', 'APPT DATE', 'APPT TIME', 'VEHICLE', 'ADVISOR',
+    'SERVICES', 'DMS ID', 'MILEAGE', 'TECHNICIAN', 'HOME PHONE', 'WORK PHONE',
+    'TRANSPORT', 'CARRY-OVER'
+  ]];
+  recs.forEach(function (r) {
+    var ap = pdfApptSplit(r._appt);
+    rows.push([
+      blank(r.name), blank(r.phone), blank(r.vin), ap.date, ap.time,
+      blank(r.vehicle), blank(r.advisor), blank(r.services), blank(r.dms),
+      blank(r.mileage), blank(r.tech), blank(r.home), blank(r.work),
+      blank(r.transport), blank(r.carry)
+    ]);
+  });
+  return rows;
+}
+
+/** "Oct 5, 2026 07:00AM" -> { date: "10/05/2026", time: "07:00AM" }.
+ *  The date is emitted in the US form parseDate already understands, so the
+ *  month-name format the DMS prints never has to be taught to the matcher. */
+function pdfApptSplit(v) {
+  var s = String(v == null ? '' : v).trim();
+  var m = s.match(/^([A-Za-z]{3,9})\.?\s+(\d{1,2}),?\s+(\d{4})(?:\s+(.*))?$/);
+  if (!m) return { date: s, time: '' };
+  var MON = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+              jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
+  var mo = MON[m[1].slice(0, 3).toLowerCase()];
+  if (!mo) return { date: s, time: '' };
+  var pad = function (n) { return (n < 10 ? '0' : '') + n; };
+  return { date: pad(mo) + '/' + pad(+m[2]) + '/' + m[3], time: (m[4] || '').trim() };
+}
+
+/** Collect positioned text from every page, in order. pdf.js renders a page
+ *  at a time, so the pages are chained to keep them in sequence. */
+function pdfReadAll(doc) {
+  var items = [];
+  var chain = Promise.resolve();
+  for (var p = 1; p <= doc.numPages; p++) {
+    (function (n) {
+      chain = chain.then(function () { return doc.getPage(n); })
+        .then(function (page) { return page.getTextContent(); })
+        .then(function (tc) {
+          tc.items.forEach(function (it) {
+            items.push({ s: it.str, x: it.transform[4], y: it.transform[5], page: n });
+          });
+        });
+    })(p);
+  }
+  return chain.then(function () { return items; });
+}
+
 function handleFile(file) {
   if (!file) return;
   var name = file.name.toLowerCase();
@@ -622,6 +829,34 @@ function handleFile(file) {
       }
     };
     fr.readAsArrayBuffer(file);
+    return;
+  }
+
+  if (/\.pdf$/.test(name)) {
+    if (typeof pdfjsLib === 'undefined') {
+      toast('PDF support needs the pdf.js library, which didn\'t load. Reconnect to the internet, or ask the DMS for a CSV/Excel export.', 'err');
+      return;
+    }
+    pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER;
+    var frPdf = new FileReader();
+    frPdf.onload = function (e) {
+      var loading = pdfjsLib.getDocument({ data: new Uint8Array(e.target.result) });
+      loading.promise
+        .then(pdfReadAll)
+        .then(function (items) {
+          var rows = pdfBlocksToRows(items);
+          if (rows.length < 2) {
+            toast('That PDF has no readable text. If it is a scan or a photo of a screen, the DMS has to export a real PDF (or CSV) instead.', 'err');
+            return;
+          }
+          done(rows);
+        })
+        .catch(function (err) {
+          toast('Could not read that PDF: ' + (err && err.message ? err.message : err), 'err');
+        });
+    };
+    frPdf.onerror = function () { toast('Could not open that file.', 'err'); };
+    frPdf.readAsArrayBuffer(file);
     return;
   }
 

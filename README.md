@@ -61,9 +61,45 @@ http://localhost:8080/. Nothing to install.
    The tab resolves to this month's sheet automatically. The column mapping is
    detected from the headings, and **RO# is pinned to the `RO` column** — there
    is deliberately no dropdown to redirect it.
-2. In **step 2**, drop your DMS export (`.csv` or `.xlsx`).
+2. In **step 2**, drop your DMS export (`.csv`, `.xlsx` or `.pdf`).
 3. **step 3** shows every match with a confidence tag. Untick anything wrong.
 4. **step 4** writes the RO#s. Download the report if you want a record.
+
+---
+
+## PDF exports
+
+PDF is accepted alongside CSV and Excel, and it is parsed in the browser like
+the rest — the file is never uploaded anywhere.
+
+A DMS PDF report is **not a table**. Each appointment is a block of
+`Label:  value` pairs laid out on a grid:
+
+```
+Appt Time:  Oct 5, 2026 07:00AM   Transport:  Drop Off Vehicle
+Customer:   JANE Q. PUBLIC         Customer DMS ID:  123456
+Year/Make/Model: 2022 Hyundai Tucson  VIN:  5NPET4JA7KH123456
+Advisor:    A. ADVISOR             Mileage:   41250
+```
+
+It still reconstructs reliably, because every label sits at a fixed horizontal
+position and its value starts at the next position to the right. Long values
+that wrap to the next line keep the same position, so they don't break the
+grid either. The parser rebuilds those blocks into a normal table and hands it
+to the same code path a CSV goes through — so the mapping grid, matching and
+review all behave identically.
+
+Recognised fields: `Appt Time`, `Customer`, `Customer DMS ID`, `Mobile Phone`,
+`Home Phone`, `Work Phone`, `Year/Make/Model`, `VIN`, `Mileage`, `Advisor`,
+`Technician`, `Services`, `Transport`, `Carry-Over`, `Advisor Notes`,
+`Customer Comments`. Anything else in the report is ignored rather than
+guessed at.
+
+**One thing to know:** an appointments report contains **no RO#** — it is the
+list of who is coming in, not the repair orders themselves. Such a file belongs
+in the **"Ledger supplies the RO#"** direction, which matches each appointment
+to the ledger and hands the RO# back to you. Use **"File supplies the RO#"**
+only for exports that genuinely carry an RO# column.
 
 ---
 
@@ -151,7 +187,7 @@ The toggle in step 2 switches which side owns the RO#:
   alone. The **Overwrite** checkbox in step 3 is the only way to change that.
 - **Empty RO#s are never written.** A blank in the export skips the row rather
   than blanking the sheet.
-- **Your export never leaves the machine.** CSV/XLSX parsing happens in the
+- **Your export never leaves the machine.** CSV/XLSX/PDF parsing happens in the
   browser. The only network call is to your own Apps Script.
 
 ## Security — read this
@@ -181,6 +217,9 @@ and write your ledger. Treat it like a password.
 | Wrong column got the RO# | Fix **RO# column to write into** in step 1. The write is by column *position*, never by heading text, so renaming headings later won't break it. |
 | Only the first N rows loaded | `CONFIG.MAX_READ_ROWS` (default 6000). Raise it in `Code.gs` and redeploy. |
 | Excel files won't import | The SheetJS CDN didn't load — you're offline. Save the file as CSV instead; everything else still works. |
+| PDF files won't import | The pdf.js CDN didn't load — you're offline. Ask the DMS for a CSV/Excel export instead. |
+| PDF imported, but a field is blank | The report has no such field, or every value in it was `N/A`. Check the column mapping in step 2 — PDF headings are auto-detected but overridable. |
+| PDF says "no readable text" | It's a scan or a photo of a screen. The DMS has to export a real PDF (text-based), or use CSV. |
 
 ---
 
